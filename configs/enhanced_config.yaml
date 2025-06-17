@@ -1,0 +1,260 @@
+# Enhanced configuration for smart grid federated learning experiments
+# Updated to support baseline integration and advanced federated learning capabilities
+
+# Data processing settings
+data:
+  raw_path: "data/raw/"
+  processed_path: "data/processed/"
+  test_size: 0.2
+  validation_size: 0.1
+  feature_scaling: "standard"  # standard, minmax, robust
+  handle_missing: "median"     # median, mean, drop
+  random_state: 42
+
+# Enhanced model training settings  
+model:
+  random_state: 42
+  cross_validation_folds: 5
+  early_stopping: true
+  patience: 5
+  
+  # Baseline model selection criteria
+  selection_metric: "f1_score"  # accuracy, f1_score, precision, recall
+  optimize_for_federated: true  # Apply federated-specific optimizations
+
+# Enhanced federated learning settings
+federated_learning:
+  # Basic configuration
+  num_clients: 5
+  num_rounds: 15
+  data_distribution: "iid"  # iid, non_iid
+  model_type: "neural_network"  # neural_network, random_forest
+  aggregation_strategy: "fedavg"  # fedavg, weighted_avg
+  client_fraction: 1.0  # Fraction of clients to use per round
+  
+  # Baseline integration settings
+  baseline_integration:
+    enabled: true
+    auto_detect_best_model: true
+    parameter_transfer: true
+    performance_threshold: 0.05  # Minimum F1 improvement to use baseline config
+    fallback_to_default: true   # Use default params if baseline integration fails
+  
+  # Local training settings
+  local_training:
+    local_epochs: 10
+    batch_size: 32
+    learning_rate: 0.001
+    learning_rate_decay: 0.1
+    adaptive_lr: true  # Adjust learning rate based on round
+    
+  # Early stopping
+  early_stopping:
+    enabled: true
+    patience: 5
+    monitor_metric: "f1_score"  # accuracy, f1_score
+    min_improvement: 0.001
+    
+  # Non-IID settings
+  non_iid:
+    alpha: 0.5  # Dirichlet distribution parameter
+    dominant_classes_per_client: 2
+    class_imbalance_factor: 3  # Ratio of majority to minority class samples
+
+# Enhanced privacy settings
+privacy:
+  enabled: false  # Enable for privacy experiments
+  default_epsilon: 1.0
+  privacy_budgets: [0.1, 0.5, 1.0, 2.0, 5.0, 10.0]
+  noise_mechanism: "laplace"  # laplace, gaussian
+  clipping_threshold: 1.0
+  composition_method: "basic"  # basic, advanced, rdp
+  
+  # Privacy accounting
+  accounting:
+    track_privacy_loss: true
+    privacy_ledger: true
+    max_privacy_loss: 10.0
+
+# Enhanced neural network architecture
+neural_network:
+  architecture:
+    hidden_layers: [128, 64, 32]
+    activation: "relu"
+    dropout_rate: 0.3
+    batch_normalization: false
+  
+  optimization:
+    optimizer: "adam"
+    learning_rate: 0.001
+    weight_decay: 0.01
+    momentum: 0.9  # For SGD optimizer
+  
+  # Baseline integration specific
+  baseline_transfer:
+    transfer_architecture: true
+    transfer_weights: false  # Only transfer hyperparameters, not weights
+    scale_learning_rate: true
+
+# Enhanced random forest settings
+random_forest:
+  # Default parameters (will be overridden by baseline integration)
+  n_estimators: 100
+  max_depth: 15
+  min_samples_split: 5
+  min_samples_leaf: 2
+  max_features: "sqrt"
+  
+  # Baseline integration specific
+  baseline_transfer:
+    transfer_hyperparameters: true
+    preserve_ensemble_size: false  # Allow modification of n_estimators
+    adapt_for_federated: true  # Adjust parameters for federated setting
+
+# Enhanced flower framework settings
+flower:
+  enabled: true  # Set to true to run Flower experiments
+  simulation:
+    num_clients: 5
+    client_resources:
+      num_cpus: 1
+      num_gpus: 0
+    ray_init_args:
+      include_dashboard: false
+  
+  strategy:
+    name: "fedavg"  # fedavg, fedprox, fedopt, scaffold
+    fraction_fit: 1.0
+    fraction_evaluate: 1.0
+    min_fit_clients: 5
+    min_evaluate_clients: 5
+    min_available_clients: 5
+    
+    # Strategy specific parameters
+    fedprox:
+      proximal_mu: 0.1
+    
+    fedopt:
+      eta: 0.01
+      eta_l: 0.01
+      beta_1: 0.9
+      beta_2: 0.999
+  
+  # Baseline integration for Flower
+  baseline_integration:
+    enabled: true
+    model_architecture_sync: true
+    hyperparameter_sync: true
+
+# Enhanced evaluation settings
+evaluation:
+  metrics: ["accuracy", "f1_score", "precision", "recall", "auc"]
+  eval_frequency: 3  # Evaluate every N rounds
+  save_predictions: true  # Save predictions for confusion matrix generation
+  save_intermediate_results: true
+  
+  # Comparison settings
+  baseline_comparison:
+    enabled: true
+    calculate_retention_rates: true
+    performance_degradation_analysis: true
+    statistical_significance_tests: true
+  
+  # Visualization settings
+  visualization:
+    auto_generate: true
+    save_formats: ["png", "pdf"]
+    figure_quality: "publication"  # draft, presentation, publication
+
+# Enhanced experiment configurations
+experiments:
+  # Core experiments
+  run_baseline: true
+  run_standard_federated: true
+  run_non_iid_federated: true
+  run_privacy_experiments: true
+  run_flower_experiments: false
+  
+  # Advanced experiments
+  run_baseline_integration_analysis: true
+  run_comparative_framework_analysis: true
+  run_ablation_studies: true
+  
+  # Experiment specific settings
+  ablation_studies:
+    test_without_baseline_integration: true
+    test_different_aggregation_methods: true
+    test_various_client_numbers: [3, 5, 7, 10]
+    test_communication_rounds: [5, 10, 15, 20]
+
+# Enhanced output settings
+output:
+  save_models: true
+  save_figures: true
+  save_logs: true
+  save_configurations: true  # Save actual configurations used
+  figure_dpi: 300
+  results_dir: "results/"
+  
+  # Enhanced result organization
+  organization:
+    separate_experiment_dirs: true
+    timestamp_results: true
+    compress_large_files: true
+    
+  # Export settings
+  export:
+    latex_tables: true
+    csv_summaries: true
+    json_metadata: true
+
+# Enhanced logging settings
+logging:
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR
+  save_to_file: true
+  log_file: "enhanced_federated_learning.log"
+  
+  # Advanced logging
+  structured_logging: true
+  log_experiment_config: true
+  log_baseline_integration: true
+  log_performance_metrics: true
+  
+  # Logging filters
+  filters:
+    exclude_debug_noise: true
+    highlight_integration_events: true
+    track_performance_improvements: true
+
+# System settings
+system:
+  # Resource management
+  max_memory_usage: "8GB"
+  enable_multiprocessing: true
+  max_workers: 4
+  
+  # Reproducibility
+  set_global_seed: true
+  deterministic_algorithms: true
+  
+  # Performance optimization
+  enable_caching: true
+  cache_processed_data: true
+  parallel_client_training: false  # Set to true for faster execution
+
+# Research settings for academic use
+research:
+  # Publication preparation
+  generate_latex_snippets: true
+  create_figure_captions: true
+  statistical_analysis: true
+  
+  # Collaboration features
+  export_results_summary: true
+  create_presentation_materials: false
+  generate_progress_reports: true
+  
+  # Validation settings
+  cross_validation_experiments: false
+  multiple_random_seeds: false
+  confidence_intervals: true
