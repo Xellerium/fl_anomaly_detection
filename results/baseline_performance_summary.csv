@@ -1,0 +1,6 @@
+Model,Validation Accuracy,Validation F1-Score,Training Time (s),CV Mean
+Random Forest,0.8144,0.7798,5.67,0.7723
+LightGBM,0.7931,0.7526,1.87,0.7477
+XGBoost,0.7836,0.7388,4.07,0.7365
+CatBoost,0.7441,0.6675,4.99,N/A
+Logistic Regression,0.7212,0.6370,92.94,N/A
