@@ -42,7 +42,7 @@ federated_learning:
   
   # Local training settings
   local_training:
-    local_epochs: 10
+    local_epochs: 50
     batch_size: 32
     learning_rate: 0.001
     learning_rate_decay: 0.1

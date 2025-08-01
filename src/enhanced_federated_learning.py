@@ -1,29 +1,56 @@
 """
-Enhanced Federated Learning Implementation for Smart Grid Security
-Fixed issues with model aggregation, privacy mechanisms, and learning dynamics
-Now integrates with best baseline model automatically
+PriFed-GridGuard: Privacy-Enhanced Federated Learning for Smart Grid Security
+Implements advanced privacy mechanisms for federated learning with multi-dataset support
 
-Key Improvements:
-1. Automatic best baseline model integration
-2. Proper federated averaging for neural networks
-3. Dynamic learning rates and early stopping
-4. Robust differential privacy implementation
-5. Better client data heterogeneity handling
-6. Comprehensive evaluation metrics
+Privacy Mechanisms:
+1. Context-Aware Local Differential Privacy (CA-LDP)
+2. Cluster-Adaptive Differential Privacy (CADP) 
+3. Selective Homomorphic Encryption (S-HE)
+4. Utility-Aware Noise Scheduler (UANS)
+
+Features:
+- Multi-dataset support (MSU, Pecan Street, SGCC)
+- Automatic best baseline model integration
+- Privacy-utility trade-off analysis
+- Publication-ready results generation
 """
 
 import pandas as pd
 import numpy as np
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.neural_network import MLPClassifier
-from sklearn.metrics import accuracy_score, f1_score, classification_report, confusion_matrix
+from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score, classification_report, confusion_matrix
+from sklearn.cluster import KMeans
+from sklearn.preprocessing import StandardScaler
 import copy
 import pickle
 import time
 import warnings
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Union
 import logging
+from collections import defaultdict
+import hashlib
+
+# Try to import PyTorch for GPU support
+try:
+    import torch
+    import torch.nn as nn
+    import torch.optim as optim
+    from torch.utils.data import DataLoader, TensorDataset
+    TORCH_AVAILABLE = True
+    CUDA_AVAILABLE = torch.cuda.is_available()
+    if CUDA_AVAILABLE:
+        print(f"[SUCCESS] CUDA is available - GPU acceleration enabled for neural networks")
+        DEVICE = torch.device('cuda')
+    else:
+        print(f"✗ CUDA not available - using CPU for neural networks")
+        DEVICE = torch.device('cpu')
+except ImportError:
+    TORCH_AVAILABLE = False
+    CUDA_AVAILABLE = False
+    DEVICE = None
+    print("✗ PyTorch not installed - using sklearn MLPClassifier")
 
 warnings.filterwarnings('ignore')
 
@@ -31,735 +58,1036 @@ warnings.filterwarnings('ignore')
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-class AdvancedFederatedClient:
-    """Enhanced federated client with improved local training and model updates"""
+
+# PyTorch Neural Network for GPU acceleration
+if TORCH_AVAILABLE:
+    class SmartGridNN(nn.Module):
+        """PyTorch neural network for smart grid classification with GPU support"""
+        
+        def __init__(self, input_size: int, hidden_sizes: Tuple[int, ...], num_classes: int):
+            super(SmartGridNN, self).__init__()
+            
+            layers = []
+            prev_size = input_size
+            
+            # Build hidden layers
+            for hidden_size in hidden_sizes:
+                layers.extend([
+                    nn.Linear(prev_size, hidden_size),
+                    nn.ReLU(),
+                    nn.Dropout(0.2)
+                ])
+                prev_size = hidden_size
+            
+            # Output layer
+            layers.append(nn.Linear(prev_size, num_classes))
+            
+            self.network = nn.Sequential(*layers)
+            
+        def forward(self, x):
+            return self.network(x)
+
+
+class PrivacyMechanisms:
+    """Implements privacy mechanisms for PriFed-GridGuard"""
     
-    def __init__(self, client_id: int, model_type: str = "neural_network", random_state: int = 42, model_params: Dict = None):
+    @staticmethod
+    def add_ca_ldp_noise(data: np.ndarray, feature_sensitivities: Dict[int, float], 
+                        epsilon: float) -> np.ndarray:
+        """Context-Aware Local Differential Privacy - adds varying noise based on feature sensitivity"""
+        noisy_data = data.copy()
+        
+        for i in range(data.shape[1]):
+            sensitivity = feature_sensitivities.get(i, 0.5)  # Default medium sensitivity
+            
+            # Scale noise based on sensitivity (higher sensitivity = more noise)
+            noise_scale = sensitivity / epsilon
+            
+            # Add Laplace noise
+            noise = np.random.laplace(0, noise_scale, size=data.shape[0])
+            noisy_data[:, i] += noise
+        
+        return noisy_data
+    
+    @staticmethod
+    def selective_homomorphic_encryption(params: Dict, sensitive_dims: List[int], 
+                                       key: str = "default") -> Dict:
+        """Selective Homomorphic Encryption - encrypts only sensitive dimensions"""
+        encrypted_params = copy.deepcopy(params)
+        
+        # Simple encryption simulation (in practice, use real HE library like TenSEAL)
+        for dim in sensitive_dims:
+            if 'coefs' in params:  # Neural network
+                for i, coef in enumerate(params['coefs']):
+                    if dim < coef.shape[0]:
+                        # Simulate encryption by hashing
+                        encrypted_params['coefs'][i][dim] = hash(str(coef[dim]) + key) % 1e6
+            elif 'feature_importances' in params:  # Random Forest
+                if dim < len(params['feature_importances']):
+                    encrypted_params['feature_importances'][dim] = hash(
+                        str(params['feature_importances'][dim]) + key
+                    ) % 1e6
+        
+        encrypted_params['encrypted_dims'] = sensitive_dims
+        return encrypted_params
+    
+    @staticmethod
+    def decrypt_selective_params(encrypted_params: Dict, key: str = "default") -> Dict:
+        """Decrypt selectively encrypted parameters (simulation)"""
+        # In practice, would use real HE decryption
+        # For simulation, we'll just mark as decrypted
+        decrypted_params = copy.deepcopy(encrypted_params)
+        if 'encrypted_dims' in decrypted_params:
+            del decrypted_params['encrypted_dims']
+        return decrypted_params
+
+
+class PrivacyEnhancedFederatedClient:
+    """Enhanced federated client with privacy mechanisms"""
+    
+    def __init__(self, client_id: int, cluster_id: int = 0, model_type: str = "neural_network", 
+                 random_state: int = 42, privacy_config: Dict = None):
         self.client_id = client_id
+        self.cluster_id = cluster_id
         self.model_type = model_type
         self.random_state = random_state
         self.model = None
         self.local_data = None
         self.local_labels = None
         self.data_size = 0
-        self.local_epochs = 3
+        self.local_epochs = 30
         self.learning_rate = 0.01
         self.performance_history = []
-        self.model_params = model_params or {}
+        
+        # Privacy configuration
+        self.privacy_config = privacy_config or {
+            'ca_ldp_enabled': False,
+            'epsilon': 1.0,
+            's_he_enabled': False,
+            'sensitive_features_ratio': 0.3
+        }
+        
+        # Feature sensitivities (will be computed based on data)
+        self.feature_sensitivities = {}
         
     def load_local_data(self, X_local: pd.DataFrame, y_local: np.ndarray):
-        """Load and validate local training data"""
+        """Load local data and compute feature sensitivities"""
         self.local_data = X_local.copy()
         self.local_labels = y_local.copy()
         self.data_size = len(X_local)
         
-        # Analyze local data distribution
+        # Compute feature sensitivities based on variance and correlation with labels
+        self._compute_feature_sensitivities()
+        
+        # Log data distribution
         unique, counts = np.unique(y_local, return_counts=True)
         class_dist = dict(zip(unique, counts))
-        
-        logger.info(f"Client {self.client_id}: Loaded {self.data_size} samples, "
-                   f"class distribution: {class_dist}")
+        logger.info(f"Client {self.client_id} (Cluster {self.cluster_id}): "
+                   f"{self.data_size} samples, distribution: {class_dist}")
     
-    def initialize_model(self, global_model=None):
-        """Initialize local model with flexible architecture and optimal parameters"""
+    def _compute_feature_sensitivities(self):
+        """Compute sensitivity scores for each feature"""
+        X = self.local_data.values if isinstance(self.local_data, pd.DataFrame) else self.local_data
+        
+        # Normalize features
+        scaler = StandardScaler()
+        X_scaled = scaler.fit_transform(X)
+        
+        # Compute correlation with labels
+        correlations = []
+        for i in range(X_scaled.shape[1]):
+            corr = np.corrcoef(X_scaled[:, i], self.local_labels)[0, 1]
+            correlations.append(abs(corr) if not np.isnan(corr) else 0)
+        
+        # Compute variance
+        variances = np.var(X_scaled, axis=0)
+        
+        # Combine into sensitivity scores (high correlation + high variance = high sensitivity)
+        max_corr = max(correlations) if correlations else 1
+        max_var = max(variances) if len(variances) > 0 else 1
+        
+        for i in range(X.shape[1]):
+            corr_score = correlations[i] / max_corr if max_corr > 0 else 0
+            var_score = variances[i] / max_var if max_var > 0 else 0
+            self.feature_sensitivities[i] = (corr_score + var_score) / 2
+    
+    def initialize_model(self, global_model=None, model_params: Dict = None):
+        """Initialize model with privacy-aware configuration"""
         if global_model is None:
             if self.model_type == "neural_network":
+                # Check if we have all classes in our local data
+                unique_classes = np.unique(self.local_labels) if hasattr(self, 'local_labels') else []
+                warm_start = len(unique_classes) == 3 if len(unique_classes) > 0 else False
+                
                 self.model = MLPClassifier(
-                    hidden_layer_sizes=self.model_params.get('hidden_layer_sizes', (100, 50)),
+                    hidden_layer_sizes=model_params.get('hidden_layer_sizes', (100, 50)),
                     learning_rate_init=self.learning_rate,
                     max_iter=self.local_epochs,
                     random_state=self.random_state + self.client_id,
                     early_stopping=False,
-                    warm_start=True,
-                    alpha=self.model_params.get('alpha', 0.01)
+                    warm_start=warm_start,
+                    alpha=model_params.get('alpha', 0.01)
                 )
-            else:  # Random Forest with optimized parameters
+            else:  # Random Forest
                 self.model = RandomForestClassifier(
-                    n_estimators=self.model_params.get('n_estimators', 100),
-                    max_depth=self.model_params.get('max_depth', 15),
-                    min_samples_split=self.model_params.get('min_samples_split', 5),
-                    min_samples_leaf=self.model_params.get('min_samples_leaf', 2),
+                    n_estimators=model_params.get('n_estimators', 100),
+                    max_depth=model_params.get('max_depth', 15),
+                    min_samples_split=model_params.get('min_samples_split', 5),
                     random_state=self.random_state + self.client_id,
                     n_jobs=1
                 )
         else:
             self.model = copy.deepcopy(global_model)
     
-    def local_training(self, global_round: int) -> Dict:
-        """Enhanced local training with adaptive learning"""
+    def local_training_with_privacy(self, global_round: int, cluster_epsilon: float = None) -> Dict:
+        """Local training with CA-LDP privacy enhancement"""
         if self.local_data is None or self.model is None:
             raise ValueError("Local data and model must be initialized")
         
         start_time = time.time()
         
-        # Adaptive learning rate based on round
+        # Use cluster-specific epsilon if provided (CADP)
+        epsilon = cluster_epsilon if cluster_epsilon else self.privacy_config['epsilon']
+        
+        # Apply CA-LDP if enabled
+        if self.privacy_config.get('ca_ldp_enabled', False):
+            X_train = PrivacyMechanisms.add_ca_ldp_noise(
+                self.local_data.values, 
+                self.feature_sensitivities,
+                epsilon
+            )
+        else:
+            X_train = self.local_data.values
+        
+        # Adaptive learning rate
         if hasattr(self.model, 'learning_rate_init'):
             self.model.learning_rate_init = max(0.001, self.learning_rate / (1 + 0.05 * global_round))
         
-        # Train model on local data
+        # Train model
         try:
-            self.model.fit(self.local_data, self.local_labels)
-                
+            self.model.fit(X_train, self.local_labels)
         except Exception as e:
             logger.error(f"Client {self.client_id} training failed: {e}")
             return {'error': str(e)}
         
-        # Calculate local performance metrics
-        local_predictions = self.model.predict(self.local_data)
-        local_accuracy = accuracy_score(self.local_labels, local_predictions)
-        local_f1 = f1_score(self.local_labels, local_predictions, average='weighted')
+        # Evaluate on original data (without noise)
+        predictions = self.model.predict(self.local_data)
+        accuracy = accuracy_score(self.local_labels, predictions)
+        f1 = f1_score(self.local_labels, predictions, average='weighted')
         
         training_time = time.time() - start_time
         
-        # Store performance history
         performance = {
             'round': global_round,
-            'accuracy': local_accuracy,
-            'f1_score': local_f1,
+            'accuracy': accuracy,
+            'f1_score': f1,
             'training_time': training_time,
-            'data_size': self.data_size
+            'data_size': self.data_size,
+            'cluster_id': self.cluster_id,
+            'epsilon_used': epsilon
         }
-        self.performance_history.append(performance)
         
+        self.performance_history.append(performance)
         logger.info(f"Client {self.client_id} Round {global_round}: "
-                   f"Acc={local_accuracy:.4f}, F1={local_f1:.4f}")
+                   f"Acc={accuracy:.4f}, F1={f1:.4f}, ε={epsilon:.2f}")
         
         return performance
     
-    def get_model_parameters(self) -> Dict:
+    def get_encrypted_parameters(self) -> Dict:
+        """Get model parameters with selective encryption"""
+        params = self._extract_model_parameters()
+        
+        if self.privacy_config.get('s_he_enabled', False):
+            # Determine sensitive dimensions
+            n_features = len(self.feature_sensitivities)
+            n_sensitive = int(n_features * self.privacy_config.get('sensitive_features_ratio', 0.3))
+            
+            # Select most sensitive features
+            sorted_features = sorted(self.feature_sensitivities.items(), 
+                                   key=lambda x: x[1], reverse=True)
+            sensitive_dims = [feat[0] for feat in sorted_features[:n_sensitive]]
+            
+            # Apply selective encryption
+            params = PrivacyMechanisms.selective_homomorphic_encryption(
+                params, sensitive_dims, key=f"client_{self.client_id}"
+            )
+        
+        return params
+    
+    def _extract_model_parameters(self) -> Dict:
         """Extract model parameters for aggregation"""
         if self.model_type == "neural_network" and hasattr(self.model, 'coefs_'):
             return {
                 'coefs': [coef.copy() for coef in self.model.coefs_],
                 'intercepts': [intercept.copy() for intercept in self.model.intercepts_],
                 'data_size': self.data_size,
-                'client_id': self.client_id
+                'client_id': self.client_id,
+                'cluster_id': self.cluster_id
             }
         else:
-            # For Random Forest, return feature importances and basic params
             return {
                 'model': copy.deepcopy(self.model),
                 'feature_importances': self.model.feature_importances_.copy() if hasattr(self.model, 'feature_importances_') else None,
                 'data_size': self.data_size,
                 'client_id': self.client_id,
-                'predictions': None  # Will be filled during evaluation
+                'cluster_id': self.cluster_id
             }
     
     def update_model_parameters(self, aggregated_params: Dict):
         """Update local model with aggregated parameters"""
         if self.model_type == "neural_network" and 'coefs' in aggregated_params:
-            if hasattr(self.model, 'coefs_'):
                 self.model.coefs_ = [coef.copy() for coef in aggregated_params['coefs']]
                 self.model.intercepts_ = [intercept.copy() for intercept in aggregated_params['intercepts']]
         elif 'model' in aggregated_params:
             self.model = copy.deepcopy(aggregated_params['model'])
 
-class AdvancedFederatedServer:
-    """Enhanced federated server with proper model aggregation and privacy"""
+
+class ClusterAdaptivePrivacyManager:
+    """Implements Cluster-Adaptive Differential Privacy (CADP)"""
     
-    def __init__(self, model_type: str = "neural_network", privacy_budget: float = 1.0, 
-                 random_state: int = 42, baseline_config: Dict = None):
-        self.model_type = model_type
+    def __init__(self, n_clusters: int = 3, base_epsilon: float = 1.0):
+        self.n_clusters = n_clusters
+        self.base_epsilon = base_epsilon
+        self.cluster_epsilons = {}
+        self.cluster_characteristics = {}
+    
+    def cluster_clients(self, client_data_stats: List[Dict]) -> Dict[int, int]:
+        """Cluster clients based on data characteristics"""
+        # Extract features for clustering
+        features = []
+        client_ids = []
+        
+        for stats in client_data_stats:
+            client_ids.append(stats['client_id'])
+            features.append([
+                stats['data_size'],
+                stats['n_classes'],
+                stats.get('avg_feature_sensitivity', 0.5)
+            ])
+        
+        # Normalize features
+        scaler = StandardScaler()
+        features_scaled = scaler.fit_transform(features)
+        
+        # Perform clustering
+        kmeans = KMeans(n_clusters=self.n_clusters, random_state=42)
+        cluster_labels = kmeans.fit_predict(features_scaled)
+        
+        # Create client-cluster mapping
+        client_clusters = dict(zip(client_ids, cluster_labels))
+        
+        # Analyze cluster characteristics
+        for cluster_id in range(self.n_clusters):
+            cluster_indices = [i for i, label in enumerate(cluster_labels) if label == cluster_id]
+            cluster_features = [features[i] for i in cluster_indices]
+            
+            if cluster_features:
+                avg_features = np.mean(cluster_features, axis=0)
+                self.cluster_characteristics[cluster_id] = {
+                    'avg_data_size': avg_features[0],
+                    'avg_n_classes': avg_features[1],
+                    'avg_sensitivity': avg_features[2],
+                    'n_clients': len(cluster_indices)
+                }
+        
+        # Assign adaptive epsilon values
+        self._assign_cluster_epsilons()
+        
+        return client_clusters
+    
+    def _assign_cluster_epsilons(self):
+        """Assign epsilon values based on cluster characteristics"""
+        for cluster_id, chars in self.cluster_characteristics.items():
+            # Higher privacy budget for clusters with:
+            # - Larger datasets (more robust to noise)
+            # - Lower sensitivity scores
+            # - Better class balance
+            
+            size_factor = min(2.0, chars['avg_data_size'] / 1000)  # Normalize by 1000 samples
+            sensitivity_factor = 1.0 - chars['avg_sensitivity']
+            
+            # Weighted combination
+            adjustment = (size_factor * 0.4 + sensitivity_factor * 0.6) # Adjusted weights
+            
+            # Scale epsilon
+            self.cluster_epsilons[cluster_id] = self.base_epsilon * max(0.5, min(2.0, adjustment))
+            
+            logger.info(f"Cluster {cluster_id}: ε = {self.cluster_epsilons[cluster_id]:.2f}, "
+                       f"clients = {chars['n_clients']}")
+
+
+class UtilityAwareNoiseScheduler:
+    """Implements Utility-Aware Noise Scheduler (UANS)"""
+    
+    def __init__(self, total_rounds: int, base_epsilon: float, 
+                 privacy_budget: float = 10.0):
+        self.total_rounds = total_rounds
+        self.base_epsilon = base_epsilon
+        self.privacy_budget = privacy_budget
+        self.round_epsilons = {}
+        self.performance_history = []
+        
+        # Initialize round-specific epsilons
+        self._initialize_schedule()
+    
+    def _initialize_schedule(self):
+        """Initialize privacy budget schedule across rounds"""
+        # Allocate more budget to early rounds (critical for convergence)
+        # Use exponential decay
+        
+        weights = []
+        for r in range(self.total_rounds):
+            weight = np.exp(-0.1 * r)  # Exponential decay
+            weights.append(weight)
+        
+        # Normalize weights to sum to privacy budget
+        total_weight = sum(weights)
+        normalized_weights = [w / total_weight * self.privacy_budget for w in weights]
+        
+        # Assign epsilon values
+        for r in range(self.total_rounds):
+            self.round_epsilons[r] = max(0.1, normalized_weights[r])
+    
+    def get_round_epsilon(self, round_num: int, performance_delta: float = None) -> float:
+        """Get epsilon for current round with optional performance-based adjustment"""
+        base_epsilon = self.round_epsilons.get(round_num, self.base_epsilon)
+        
+        # Adjust based on performance improvement
+        if performance_delta is not None and len(self.performance_history) > 2:
+            # If performance is plateauing, we can use less privacy budget
+            if abs(performance_delta) < 0.001:  # Less than 0.1% improvement
+                base_epsilon *= 0.8
+            elif performance_delta > 0.01:  # More than 1% improvement
+                base_epsilon *= 1.1  # Allow slightly more budget for momentum
+        
+        # Record actual epsilon used
+        self.performance_history.append({
+            'round': round_num,
+            'epsilon': base_epsilon,
+            'performance_delta': performance_delta
+        })
+        
+        return base_epsilon
+    
+    def get_remaining_budget(self, current_round: int) -> float:
+        """Calculate remaining privacy budget"""
+        used_budget = sum(self.round_epsilons[r] for r in range(current_round))
+        return max(0, self.privacy_budget - used_budget)
+
+
+class PriFedGridGuardServer:
+    """Privacy-Enhanced Federated Server with all privacy mechanisms"""
+    
+    def __init__(self, dataset_name: str, n_clients: int = 10, 
+                 privacy_config: Dict = None, random_state: int = 42):
+        self.dataset_name = dataset_name
+        self.n_clients = n_clients
+        self.random_state = random_state
         self.global_model = None
         self.clients = []
         self.round_results = []
-        self.privacy_budget = privacy_budget
-        self.privacy_used = 0.0
-        self.random_state = random_state
-        self.best_global_performance = 0.0
-        self.patience = 5
-        self.no_improvement_rounds = 0
-        self.baseline_config = baseline_config or {}
-        self.test_predictions = None  # Store for confusion matrix generation
+        self.best_baseline_config = None
         
-    def initialize_global_model(self, input_size: int, num_classes: int, model_params: Dict = None):
-        """Initialize global model with optimal baseline configuration"""
-        params = model_params or {}
-        
-        if self.model_type == "neural_network":
-            self.global_model = MLPClassifier(
-                hidden_layer_sizes=params.get('hidden_layer_sizes', (100, 50)),
-                learning_rate_init=0.01,
-                max_iter=3,
-                random_state=self.random_state,
-                warm_start=True,
-                alpha=params.get('alpha', 0.01)
-            )
-            # Initialize with dummy data to set up the architecture
-            dummy_X = np.random.random((100, input_size))
-            dummy_y = np.random.randint(0, num_classes, 100)
-            self.global_model.fit(dummy_X, dummy_y)
-        else:
-            # Use optimal parameters from best baseline model
-            self.global_model = RandomForestClassifier(
-                n_estimators=params.get('n_estimators', 100),
-                max_depth=params.get('max_depth', 15),
-                min_samples_split=params.get('min_samples_split', 5),
-                min_samples_leaf=params.get('min_samples_leaf', 2),
-                random_state=self.random_state,
-                n_jobs=-1
-            )
-        
-        logger.info(f"Global {self.model_type} model initialized with optimal parameters")
-        if params:
-            logger.info(f"Using baseline configuration: {params}")
-    
-    def register_client(self, client):
-        """Register client with validation"""
-        self.clients.append(client)
-        logger.info(f"Client {client.client_id} registered. Total clients: {len(self.clients)}")
-    
-    def federated_averaging(self, client_updates: List[Dict], apply_privacy: bool = False) -> Dict:
-        """Implement proper FedAvg algorithm with optional privacy"""
-        if not client_updates:
-            return {}
-        
-        total_samples = sum(update['data_size'] for update in client_updates)
-        
-        if self.model_type == "neural_network":
-            # Weighted averaging for neural network parameters
-            if all('coefs' in update for update in client_updates):
-                # Initialize aggregated parameters
-                aggregated_coefs = []
-                aggregated_intercepts = []
-                
-                # Average each layer's weights
-                for layer_idx in range(len(client_updates[0]['coefs'])):
-                    layer_coefs = np.zeros_like(client_updates[0]['coefs'][layer_idx])
-                    layer_intercepts = np.zeros_like(client_updates[0]['intercepts'][layer_idx])
-                    
-                    for update in client_updates:
-                        weight = update['data_size'] / total_samples
-                        layer_coefs += weight * update['coefs'][layer_idx]
-                        layer_intercepts += weight * update['intercepts'][layer_idx]
-                    
-                    # Add differential privacy noise if requested
-                    if apply_privacy and self.privacy_budget > self.privacy_used:
-                        noise_scale = 0.1 / (self.privacy_budget - self.privacy_used)
-                        layer_coefs += np.random.laplace(0, noise_scale, layer_coefs.shape)
-                        layer_intercepts += np.random.laplace(0, noise_scale, layer_intercepts.shape)
-                        self.privacy_used += 0.1
-                    
-                    aggregated_coefs.append(layer_coefs)
-                    aggregated_intercepts.append(layer_intercepts)
-                
-                return {
-                    'coefs': aggregated_coefs,
-                    'intercepts': aggregated_intercepts
-                }
-        
-        # For Random Forest, use weighted model selection with ensemble approach
-        weights = np.array([update['data_size'] for update in client_updates])
-        weights = weights / np.sum(weights)
-        
-        if apply_privacy and self.privacy_budget > self.privacy_used:
-            noise_scale = 0.1 / (self.privacy_budget - self.privacy_used)
-            weights += np.random.laplace(0, noise_scale, len(weights))
-            weights = np.maximum(weights, 0)  # Ensure non-negative
-            weights = weights / np.sum(weights)  # Renormalize
-            self.privacy_used += 0.1
-        
-        # Select best performing client as global model (improved aggregation)
-        performance_scores = []
-        for update in client_updates:
-            # Weight by both data size and performance
-            score = update['f1_score'] * (update['data_size'] / total_samples)
-            performance_scores.append(score)
-        
-        best_idx = np.argmax(performance_scores)
-        return client_updates[best_idx]
-    
-    def federated_round(self, round_num: int, apply_privacy: bool = False) -> Dict:
-        """Execute enhanced federated learning round"""
-        logger.info(f"\n--- Federated Learning Round {round_num} ---")
-        
-        # Distribute global model to clients
-        for client in self.clients:
-            client.update_model_parameters(self.get_global_parameters())
-        
-        # Collect client updates after local training
-        client_updates = []
-        for client in self.clients:
-            performance = client.local_training(round_num)
-            if 'error' not in performance:
-                model_params = client.get_model_parameters()
-                model_params.update(performance)
-                client_updates.append(model_params)
-        
-        if not client_updates:
-            logger.error("No successful client updates received")
-            return {}
-        
-        # Aggregate models
-        aggregated_params = self.federated_averaging(client_updates, apply_privacy)
-        self.update_global_model(aggregated_params)
-        
-        # Calculate round statistics
-        total_samples = sum(update['data_size'] for update in client_updates)
-        weighted_accuracy = sum(
-            update['accuracy'] * update['data_size'] for update in client_updates
-        ) / total_samples
-        weighted_f1 = sum(
-            update['f1_score'] * update['data_size'] for update in client_updates
-        ) / total_samples
-        
-        # Check for improvement
-        current_performance = weighted_f1
-        improvement = False
-        if current_performance > self.best_global_performance:
-            self.best_global_performance = current_performance
-            self.no_improvement_rounds = 0
-            improvement = True
-        else:
-            self.no_improvement_rounds += 1
-        
-        round_stats = {
-            'round': round_num,
-            'avg_accuracy': weighted_accuracy,
-            'avg_f1_score': weighted_f1,
-            'total_samples': total_samples,
-            'privacy_used': self.privacy_used,
-            'privacy_applied': apply_privacy,
-            'improvement': improvement
+        # Privacy configuration
+        self.privacy_config = privacy_config or {
+            'ca_ldp': True,
+            'cadp': True,
+            's_he': True,
+            'uans': True,
+            'base_epsilon': 1.0,
+            'total_privacy_budget': 10.0,
+            'n_clusters': 3
         }
         
-        self.round_results.append(round_stats)
+        # Initialize privacy managers
+        self.cluster_manager = ClusterAdaptivePrivacyManager(
+            n_clusters=self.privacy_config['n_clusters'],
+            base_epsilon=self.privacy_config['base_epsilon']
+        ) if self.privacy_config['cadp'] else None
         
-        logger.info(f"Round {round_num} Results:")
-        logger.info(f"  Average Accuracy: {weighted_accuracy:.4f}")
-        logger.info(f"  Average F1-Score: {weighted_f1:.4f}")
-        logger.info(f"  Best F1 So Far: {self.best_global_performance:.4f}")
-        if apply_privacy:
-            logger.info(f"  Privacy Budget Used: {self.privacy_used:.3f}/{self.privacy_budget}")
+        self.noise_scheduler = UtilityAwareNoiseScheduler(
+            total_rounds=20,  # Will be updated
+            base_epsilon=self.privacy_config['base_epsilon'],
+            privacy_budget=self.privacy_config['total_privacy_budget']
+        ) if self.privacy_config['uans'] else None
         
-        return round_stats
+        logger.info(f"Initialized PriFed-GridGuard Server for {dataset_name}")
     
-    def get_global_parameters(self) -> Dict:
-        """Get global model parameters for distribution"""
-        if self.model_type == "neural_network" and hasattr(self.global_model, 'coefs_'):
-            return {
-                'coefs': [coef.copy() for coef in self.global_model.coefs_],
-                'intercepts': [intercept.copy() for intercept in self.global_model.intercepts_]
-            }
-        else:
-            return {'model': copy.deepcopy(self.global_model)}
-    
-    def update_global_model(self, aggregated_params: Dict):
-        """Update global model with aggregated parameters"""
-        if self.model_type == "neural_network" and 'coefs' in aggregated_params:
-            if hasattr(self.global_model, 'coefs_'):
-                self.global_model.coefs_ = [coef.copy() for coef in aggregated_params['coefs']]
-                self.global_model.intercepts_ = [intercept.copy() for intercept in aggregated_params['intercepts']]
-        elif 'model' in aggregated_params:
-            self.global_model = copy.deepcopy(aggregated_params['model'])
-    
-    def should_stop_early(self) -> bool:
-        """Check if training should stop early"""
-        return self.no_improvement_rounds >= self.patience
-    
-    def evaluate_global_model(self, X_test: pd.DataFrame, y_test: np.ndarray) -> Dict:
-        """Evaluate global model on test set and store predictions"""
-        try:
-            if self.global_model is None:
-                logger.error("Global model not initialized")
-                return {'test_accuracy': 0.0, 'test_f1': 0.0}
-            
-            # If neural network needs fitting, train on combined client data
-            if self.model_type == "neural_network" and not hasattr(self.global_model, 'coefs_'):
-                all_X = []
-                all_y = []
-                for client in self.clients:
-                    all_X.append(client.local_data)
-                    all_y.append(client.local_labels)
-                
-                X_combined = pd.concat(all_X, ignore_index=True)
-                y_combined = np.concatenate(all_y)
-                self.global_model.fit(X_combined, y_combined)
-            
-            # Generate predictions and store for confusion matrix
-            test_predictions = self.global_model.predict(X_test)
-            self.test_predictions = test_predictions  # Store for later use
-            
-            test_accuracy = accuracy_score(y_test, test_predictions)
-            test_f1 = f1_score(y_test, test_predictions, average='weighted')
-            
-            return {
-                'test_accuracy': test_accuracy,
-                'test_f1': test_f1,
-                'predictions': test_predictions
-            }
-            
-        except Exception as e:
-            logger.error(f"Global model evaluation failed: {e}")
-            return {'test_accuracy': 0.0, 'test_f1': 0.0}
-
-class EnhancedFederatedExperiment:
-    """Enhanced federated learning experiment with baseline model integration"""
-    
-    def __init__(self, model_type: str = "neural_network", random_state: int = 42):
-        self.model_type = model_type
-        self.random_state = random_state
-        self.server = None
-        self.clients = []
-        self.results = {}
-        self.best_baseline_model = None
-        self.model_params = {}
+    def load_dataset_and_baseline(self, data_path: str = "data/processed"):
+        """Load dataset and best baseline model configuration"""
+        # Load processed data
+        dataset_path = Path(data_path) / self.dataset_name
         
-    def load_data(self, data_path: str = "data/processed") -> bool:
-        """Load preprocessed data for federated learning"""
-        data_path = Path(data_path)
+        with open(dataset_path / 'data_splits.pkl', 'rb') as f:
+            self.data_splits = pickle.load(f)
         
-        try:
-            with open(data_path / 'data_splits.pkl', 'rb') as f:
-                splits = pickle.load(f)
+        # Load best baseline results if available
+        baseline_path = Path("results") / "best_models_summary.csv"
+        if baseline_path.exists():
+            import pandas as pd
+            best_models_df = pd.read_csv(baseline_path)
             
-            # Combine train and validation for federated learning
-            self.X_fed = pd.concat([splits['X_train'], splits['X_val']])
-            self.y_fed = np.concatenate([splits['y_train'], splits['y_val']])
-            self.X_test = splits['X_test']
-            self.y_test = splits['y_test']
-            
-            logger.info(f"Federated learning data loaded:")
-            logger.info(f"  Training data: {len(self.X_fed)} samples")
-            logger.info(f"  Test data: {len(self.X_test)} samples")
-            logger.info(f"  Features: {self.X_fed.shape[1]}")
-            logger.info(f"  Classes: {len(np.unique(self.y_fed))}")
-            
-            return True
-            
-        except FileNotFoundError:
-            logger.error("Processed data not found. Run data_pipeline.py first.")
-            return False
-    
-    def load_best_baseline_model(self) -> bool:
-        """Load the best performing baseline model configuration"""
-        results_path = Path("results")
-        
-        try:
-            # Load baseline performance summary
-            baseline_df = pd.read_csv(results_path / 'baseline_performance_summary.csv')
-            
-            # Load baseline model objects
-            with open(results_path / 'baseline_results.pkl', 'rb') as f:
-                baseline_models = pickle.load(f)
-            
-            # Identify best model by F1-score
-            best_model_name = baseline_df.loc[baseline_df['Validation F1-Score'].idxmax(), 'Model']
-            best_model_key = best_model_name.replace(' ', '_')
-            best_model_obj = baseline_models[best_model_key]['model']
-            
-            self.best_baseline_model = {
-                'name': best_model_name,
-                'model': best_model_obj,
-                'performance': {
-                    'accuracy': baseline_df.loc[baseline_df['Model'] == best_model_name, 'Validation Accuracy'].iloc[0],
-                    'f1_score': baseline_df.loc[baseline_df['Model'] == best_model_name, 'Validation F1-Score'].iloc[0]
+            # Find best model for this dataset
+            dataset_row = best_models_df[best_models_df['Dataset'] == self.dataset_name]
+            if not dataset_row.empty:
+                self.best_baseline_config = {
+                    'model_type': dataset_row.iloc[0]['Best_Model'],
+                    'accuracy': dataset_row.iloc[0]['Test_Accuracy'],
+                    'f1_score': dataset_row.iloc[0]['Test_F1']
                 }
-            }
-            
-            # Extract optimal parameters
-            if hasattr(best_model_obj, 'get_params'):
-                self.model_params = best_model_obj.get_params()
-            
-            logger.info(f"Best baseline model loaded: {best_model_name}")
-            logger.info(f"Performance: Acc={self.best_baseline_model['performance']['accuracy']:.4f}, "
-                       f"F1={self.best_baseline_model['performance']['f1_score']:.4f}")
-            
-            return True
-            
-        except FileNotFoundError:
-            logger.warning("Baseline results not found. Using default parameters.")
-            return False
+                logger.info(f"Loaded best baseline: {self.best_baseline_config['model_type']} "
+                           f"(Acc: {self.best_baseline_config['accuracy']:.4f})")
     
-    def create_client_data_splits(self, num_clients: int = 5, non_iid: bool = False) -> List[Tuple]:
-        """Create federated data splits with optional non-IID distribution"""
-        if non_iid:
-            # Create non-IID distribution
-            client_data = []
-            classes = np.unique(self.y_fed)
-            
-            for i in range(num_clients):
-                # Each client gets 2 dominant classes
-                dominant_classes = np.random.choice(classes, 2, replace=False)
-                
-                client_indices = []
-                for cls in dominant_classes:
-                    cls_indices = np.where(self.y_fed == cls)[0]
-                    n_samples = len(cls_indices) // num_clients
-                    selected = np.random.choice(cls_indices, n_samples, replace=False)
-                    client_indices.extend(selected)
-                
-                # Add some samples from other classes
-                other_classes = [c for c in classes if c not in dominant_classes]
-                for cls in other_classes:
-                    cls_indices = np.where(self.y_fed == cls)[0]
-                    n_samples = len(cls_indices) // (num_clients * 3)
-                    if n_samples > 0:
-                        selected = np.random.choice(cls_indices, n_samples, replace=False)
-                        client_indices.extend(selected)
-                
-                client_indices = np.array(client_indices)
-                X_client = self.X_fed.iloc[client_indices].reset_index(drop=True)
-                y_client = self.y_fed[client_indices]
-                client_data.append((X_client, y_client))
-                
-        else:
+    def create_federated_clients(self, data_distribution: str = "iid"):
+        """Create federated clients with data partitioning"""
+        X_train = self.data_splits['X_train']
+        y_train = self.data_splits['y_train']
+        
+        # Analyze client data for CADP
+        client_data_stats = []
+        
+        if data_distribution == "iid":
             # IID distribution
-            indices = np.random.RandomState(self.random_state).permutation(len(self.X_fed))
-            client_indices = np.array_split(indices, num_clients)
+            indices = np.arange(len(X_train))
+            np.random.shuffle(indices)
             
-            client_data = []
-            for i, client_idx in enumerate(client_indices):
-                X_client = self.X_fed.iloc[client_idx].reset_index(drop=True)
-                y_client = self.y_fed[client_idx]
-                client_data.append((X_client, y_client))
+            split_indices = np.array_split(indices, self.n_clients)
+            
+            for i in range(self.n_clients):
+                client_indices = split_indices[i]
+                X_client = X_train.iloc[client_indices]
+                y_client = y_train[client_indices]
+                
+                # Compute client statistics
+                unique, counts = np.unique(y_client, return_counts=True)
+                class_imbalance = 1 - (min(counts) / max(counts)) if len(counts) > 1 else 0
+                
+                client_data_stats.append({
+                    'client_id': i,
+                    'data_size': len(client_indices),
+                    'n_classes': len(unique),
+                    'class_imbalance': class_imbalance,
+                    'indices': client_indices
+                })
+        else:
+            # Non-IID distribution (label-based partitioning)
+            # Sort by labels
+            sorted_indices = np.argsort(y_train)
+            
+            # Create shards with dominant labels
+            n_shards = self.n_clients * 2
+            shard_size = len(y_train) // n_shards
+            shards = []
+            
+            for i in range(n_shards):
+                start_idx = i * shard_size
+                end_idx = start_idx + shard_size if i < n_shards - 1 else len(y_train)
+                shards.append(sorted_indices[start_idx:end_idx])
+            
+            # Assign shards to clients
+            np.random.shuffle(shards)
+            for i in range(self.n_clients):
+                # Each client gets 2 shards
+                client_indices = np.concatenate([
+                    shards[i * 2], 
+                    shards[i * 2 + 1] if i * 2 + 1 < len(shards) else []
+                ])
+                
+                X_client = X_train.iloc[client_indices]
+                y_client = y_train[client_indices]
+                
+                # Compute statistics
+                unique, counts = np.unique(y_client, return_counts=True)
+                class_imbalance = 1 - (min(counts) / max(counts)) if len(counts) > 1 else 0
+                
+                client_data_stats.append({
+                    'client_id': i,
+                    'data_size': len(client_indices),
+                    'n_classes': len(unique),
+                    'class_imbalance': class_imbalance,
+                    'indices': client_indices
+                })
         
-        return client_data
-    
-    def setup_federated_system_with_best_baseline(self, num_clients: int = 5, privacy_budget: float = 1.0, 
-                                                 non_iid: bool = False):
-        """Initialize federated system using the best baseline model configuration"""
-        logger.info(f"Setting up federated learning system with baseline integration...")
-        logger.info(f"Model type: {self.model_type}")
-        logger.info(f"Data distribution: {'Non-IID' if non_iid else 'IID'}")
+        # Perform client clustering if CADP is enabled
+        if self.cluster_manager:
+            client_clusters = self.cluster_manager.cluster_clients(client_data_stats)
+        else:
+            client_clusters = {i: 0 for i in range(self.n_clients)}  # All in same cluster
         
-        # Load best baseline model configuration
-        self.load_best_baseline_model()
-        
-        # Initialize server with baseline configuration
-        self.server = AdvancedFederatedServer(
-            model_type=self.model_type,
-            privacy_budget=privacy_budget, 
-            random_state=self.random_state,
-            baseline_config=self.model_params
-        )
-        
-        # Create client data splits
-        client_data_splits = self.create_client_data_splits(num_clients, non_iid)
-        
-        # Initialize global model with optimal configuration
-        num_features = self.X_fed.shape[1]
-        num_classes = len(np.unique(self.y_fed))
-        self.server.initialize_global_model(num_features, num_classes, self.model_params)
-        
-        # Initialize and register clients with optimal parameters
+        # Create client objects
         self.clients = []
-        for i, (X_client, y_client) in enumerate(client_data_splits):
-            client = AdvancedFederatedClient(
-                client_id=i, 
-                model_type=self.model_type,
-                random_state=self.random_state,
-                model_params=self.model_params
+        for i, stats in enumerate(client_data_stats):
+            client = PrivacyEnhancedFederatedClient(
+                client_id=i,
+                cluster_id=client_clusters[i],
+                model_type="neural_network",  # Will use NN for FL
+                privacy_config=self.privacy_config
             )
-            client.load_local_data(X_client, y_client)
-            client.initialize_model()
             
-            self.server.register_client(client)
+            # Load client data
+            X_client = X_train.iloc[stats['indices']]
+            y_client = y_train[stats['indices']]
+            client.load_local_data(X_client, y_client)
+            
             self.clients.append(client)
         
-        logger.info(f"Federated system initialized with {len(self.clients)} clients using optimal baseline configuration")
+        logger.info(f"Created {self.n_clients} federated clients with {data_distribution} distribution")
     
-    def run_federated_training(self, num_rounds: int = 15, apply_privacy: bool = False) -> List[Dict]:
-        """Execute enhanced federated learning training"""
-        logger.info(f"\nStarting federated training for {num_rounds} rounds...")
-        logger.info(f"Privacy protection: {'Enabled' if apply_privacy else 'Disabled'}")
-        if self.best_baseline_model:
-            logger.info(f"Using configuration from: {self.best_baseline_model['name']}")
-        
-        for round_num in range(1, num_rounds + 1):
-            round_results = self.server.federated_round(round_num, apply_privacy)
-            
-            # Evaluate on test set every 3 rounds or on final round
-            if round_num % 3 == 0 or round_num == num_rounds:
-                global_eval = self.server.evaluate_global_model(self.X_test, self.y_test)
-                round_results.update(global_eval)
-                logger.info(f"  Global Test Accuracy: {global_eval['test_accuracy']:.4f}")
-                logger.info(f"  Global Test F1-Score: {global_eval['test_f1']:.4f}")
-            
-            # Early stopping check
-            if self.server.should_stop_early():
-                logger.info(f"Early stopping triggered after {round_num} rounds")
-                break
-        
-        return self.server.round_results
-    
-    def run_comparative_analysis(self) -> Dict:
-        """Run both federated approaches and compare with baseline"""
-        logger.info("="*70)
-        logger.info("COMPARATIVE FEDERATED LEARNING ANALYSIS")
-        logger.info("="*70)
-        
-        results = {}
-        
-        # Standard federated learning with best baseline model
-        logger.info("\n1. STANDARD FEDERATED LEARNING (IID) WITH BEST BASELINE CONFIG")
-        logger.info("="*60)
-        
-        self.setup_federated_system_with_best_baseline(num_clients=5, privacy_budget=1.0, non_iid=False)
-        standard_results = self.run_federated_training(num_rounds=15, apply_privacy=False)
-        results['standard_iid_optimized'] = standard_results
-        
-        # Non-IID federated learning
-        logger.info("\n2. NON-IID FEDERATED LEARNING WITH BEST BASELINE CONFIG")
-        logger.info("="*60)
-        
-        self.setup_federated_system_with_best_baseline(num_clients=5, privacy_budget=1.0, non_iid=True)
-        non_iid_results = self.run_federated_training(num_rounds=15, apply_privacy=False)
-        results['non_iid_optimized'] = non_iid_results
-        
-        # Privacy-preserving experiments
-        logger.info("\n3. PRIVACY-PRESERVING FEDERATED LEARNING")
-        logger.info("="*60)
-        
-        privacy_results = {}
-        for epsilon in [0.5, 1.0, 5.0]:
-            logger.info(f"\n--- Privacy Experiment: ε = {epsilon} ---")
-            
-            self.setup_federated_system_with_best_baseline(num_clients=5, privacy_budget=epsilon, non_iid=False)
-            privacy_training = self.run_federated_training(num_rounds=10, apply_privacy=True)
-            privacy_results[f"epsilon_{epsilon}"] = privacy_training
-        
-        results['privacy_experiments'] = privacy_results
-        
-        # Generate comparison with baseline
-        comparison = self.compare_with_baseline()
-        results['baseline_comparison'] = comparison
-        
-        # Save results
-        self.save_results(results)
-        
-        logger.info("\n" + "="*70)
-        logger.info("COMPARATIVE ANALYSIS COMPLETED")
-        logger.info("="*70)
-        
-        return results
-    
-    def compare_with_baseline(self) -> Dict:
-        """Compare federated results with best baseline model"""
-        if not self.best_baseline_model:
-            logger.warning("No baseline model available for comparison")
-            return {}
-        
-        # Get final federated performance
-        final_eval = self.server.evaluate_global_model(self.X_test, self.y_test)
-        
-        baseline_acc = self.best_baseline_model['performance']['accuracy']
-        baseline_f1 = self.best_baseline_model['performance']['f1_score']
-        federated_acc = final_eval['test_accuracy']
-        federated_f1 = final_eval['test_f1']
-        
-        # Calculate performance gaps
-        accuracy_gap = baseline_acc - federated_acc
-        f1_gap = baseline_f1 - federated_f1
-        
-        comparison = {
-            'baseline': {
-                'model': self.best_baseline_model['name'],
-                'accuracy': baseline_acc,
-                'f1_score': baseline_f1
-            },
-            'federated': {
-                'accuracy': federated_acc,
-                'f1_score': federated_f1,
-                'predictions': final_eval.get('predictions')
-            },
-            'performance_gaps': {
-                'accuracy_gap': accuracy_gap,
-                'f1_gap': f1_gap,
-                'accuracy_retention': (federated_acc / baseline_acc) * 100,
-                'f1_retention': (federated_f1 / baseline_f1) * 100
-            }
+    def initialize_global_model(self):
+        """Initialize global model based on best baseline"""
+        # Use neural network for federated learning
+        model_params = {
+            'hidden_layer_sizes': (100, 50),
+            'alpha': 0.01
         }
         
-        logger.info(f"\nPerformance Comparison:")
-        logger.info(f"  Baseline ({self.best_baseline_model['name']}): Acc={baseline_acc:.4f}, F1={baseline_f1:.4f}")
-        logger.info(f"  Federated Learning: Acc={federated_acc:.4f}, F1={federated_f1:.4f}")
-        logger.info(f"  Performance Retention: Acc={comparison['performance_gaps']['accuracy_retention']:.1f}%, F1={comparison['performance_gaps']['f1_retention']:.1f}%")
+        # Initialize with a dummy model
+        self.global_model = MLPClassifier(
+            hidden_layer_sizes=model_params['hidden_layer_sizes'],
+            learning_rate_init=0.01,
+            max_iter=1,
+            random_state=self.random_state,
+            warm_start=True,
+            alpha=model_params['alpha']
+        )
         
-        return comparison
+        # Fit on small sample to initialize structure
+        sample_size = min(100, len(self.data_splits['X_train']))
+        self.global_model.fit(
+            self.data_splits['X_train'].iloc[:sample_size],
+            self.data_splits['y_train'][:sample_size]
+        )
+        
+        # Initialize all clients
+        for client in self.clients:
+            client.initialize_model(self.global_model, model_params)
     
-    def save_results(self, results: Dict):
-        """Save comprehensive experiment results"""
-        results_path = Path("results/federated_learning")
-        results_path.mkdir(parents=True, exist_ok=True)
-        
-        # Save complete results
-        with open(results_path / 'enhanced_federated_results.pkl', 'wb') as f:
-            pickle.dump(results, f)
-        
-        # Save training history separately for easier access
-        if 'standard_iid_optimized' in results:
-            with open(results_path / 'training_history.pkl', 'wb') as f:
-                pickle.dump(results['standard_iid_optimized'], f)
-        
-        # Save comparison results for visualization
-        if 'baseline_comparison' in results:
-            with open(results_path / 'federated_comparison.pkl', 'wb') as f:
-                pickle.dump(results['baseline_comparison'], f)
-        
-        # Generate summary text
-        summary = self.generate_experiment_summary(results)
-        with open(results_path / 'experiment_summary.txt', 'w') as f:
-            f.write(summary)
-        
-        logger.info(f"Enhanced federated learning results saved to {results_path}")
-    
-    def generate_experiment_summary(self, results: Dict) -> str:
-        """Generate comprehensive experiment summary"""
-        summary = "ENHANCED FEDERATED LEARNING EXPERIMENT SUMMARY\n"
-        summary += "="*60 + "\n\n"
-        
-        if self.best_baseline_model:
-            summary += f"BASELINE MODEL INTEGRATION:\n"
-            summary += f"- Best Model: {self.best_baseline_model['name']}\n"
-            summary += f"- Baseline Performance: Acc={self.best_baseline_model['performance']['accuracy']:.4f}, "
-            summary += f"F1={self.best_baseline_model['performance']['f1_score']:.4f}\n"
-            summary += f"- Configuration Applied: {len(self.model_params)} parameters\n\n"
-        
-        for experiment_name, experiment_results in results.items():
-            if isinstance(experiment_results, list) and experiment_results:
-                final_result = experiment_results[-1]
-                summary += f"{experiment_name.upper().replace('_', ' ')}:\n"
-                summary += f"  Rounds Completed: {len(experiment_results)}\n"
-                summary += f"  Final Accuracy: {final_result.get('avg_accuracy', 'N/A'):.4f}\n"
-                summary += f"  Final F1-Score: {final_result.get('avg_f1_score', 'N/A'):.4f}\n"
-                if 'test_accuracy' in final_result:
-                    summary += f"  Test Accuracy: {final_result['test_accuracy']:.4f}\n"
-                    summary += f"  Test F1-Score: {final_result['test_f1']:.4f}\n"
-                summary += "\n"
-            elif experiment_name == 'baseline_comparison' and experiment_results:
-                summary += "BASELINE COMPARISON:\n"
-                comp = experiment_results
-                summary += f"  Performance Retention: {comp['performance_gaps']['accuracy_retention']:.1f}% accuracy, {comp['performance_gaps']['f1_retention']:.1f}% F1\n"
-                summary += f"  Privacy Cost: {comp['performance_gaps']['accuracy_gap']:.4f} accuracy, {comp['performance_gaps']['f1_gap']:.4f} F1\n\n"
-        
-        return summary
-    
-    def run_complete_experiment(self):
-        """Execute complete enhanced federated learning experiment pipeline"""
-        logger.info("="*70)
-        logger.info("ENHANCED FEDERATED LEARNING EXPERIMENT FOR SMART GRID SECURITY")
-        logger.info("="*70)
-        
-        # Load data
-        if not self.load_data():
+    def aggregate_parameters(self, client_params: List[Dict]) -> Dict:
+        """Federated averaging with privacy-aware aggregation"""
+        if not client_params:
             return {}
         
-        # Run comparative analysis
-        results = self.run_comparative_analysis()
+        # Decrypt parameters if needed
+        if self.privacy_config['s_he']:
+            decrypted_params = []
+            for params in client_params:
+                decrypted = PrivacyMechanisms.decrypt_selective_params(params)
+                decrypted_params.append(decrypted)
+            client_params = decrypted_params
         
-        return results
-
-    # Main execution function
-def main():
-    """Run enhanced federated learning experiment with baseline integration"""
-    # Run with neural networks (recommended for better aggregation)
-    experiment_nn = EnhancedFederatedExperiment(model_type="neural_network")
-    results_nn = experiment_nn.run_complete_experiment()
+        # Calculate total data size for weighted averaging
+        total_size = sum(p['data_size'] for p in client_params)
+        
+        # Initialize aggregated parameters
+        first_params = client_params[0]
+        
+        if 'coefs' in first_params:  # Neural network
+            n_layers = len(first_params['coefs'])
+            aggregated_coefs = []
+            aggregated_intercepts = []
+            
+            for layer in range(n_layers):
+                # Weighted average of coefficients
+                layer_coef = np.zeros_like(first_params['coefs'][layer])
+                layer_intercept = np.zeros_like(first_params['intercepts'][layer])
+                
+                for params in client_params:
+                    weight = params['data_size'] / total_size
+                    layer_coef += params['coefs'][layer] * weight
+                    layer_intercept += params['intercepts'][layer] * weight
+                
+                aggregated_coefs.append(layer_coef)
+                aggregated_intercepts.append(layer_intercept)
+            
+            return {
+                'coefs': aggregated_coefs,
+                'intercepts': aggregated_intercepts
+            }
+        
+        else:  # Other model types
+            # For Random Forest, we can't easily aggregate
+            # Return the model from the client with most data
+            best_client = max(client_params, key=lambda x: x['data_size'])
+            return {'model': best_client['model']}
     
-    # Run with Random Forest using best baseline configuration
-    experiment_rf = EnhancedFederatedExperiment(model_type="random_forest")
-    results_rf = experiment_rf.run_complete_experiment()
+    def run_federated_training(self, n_rounds: int = 20, n_clients_per_round: int = None):
+        """Run privacy-enhanced federated training"""
+        if n_clients_per_round is None:
+            n_clients_per_round = max(2, int(0.5 * self.n_clients))
+        
+        # Update noise scheduler with actual rounds
+        if self.noise_scheduler:
+            self.noise_scheduler.total_rounds = n_rounds
+            self.noise_scheduler._initialize_schedule()
+        
+        logger.info(f"\nStarting Federated Training: {n_rounds} rounds, "
+                   f"{n_clients_per_round} clients/round")
+        
+        best_val_accuracy = 0
+        best_round = 0
+        consecutive_no_improvement = 0
+        
+        for round_num in range(n_rounds):
+            logger.info(f"\n--- Round {round_num + 1}/{n_rounds} ---")
+            
+            # Select clients for this round
+            selected_clients = np.random.choice(
+                self.clients, 
+                size=n_clients_per_round, 
+                replace=False
+            )
+            
+            # Get round-specific epsilon if UANS is enabled
+            if self.noise_scheduler and round_num > 0:
+                performance_delta = self.round_results[-1]['val_accuracy'] - \
+                                  (self.round_results[-2]['val_accuracy'] if len(self.round_results) > 1 else 0)
+                round_epsilon = self.noise_scheduler.get_round_epsilon(round_num, performance_delta)
+            else:
+                round_epsilon = self.privacy_config.get('base_epsilon', 1.0)
+            
+            # Client training
+            client_params = []
+            client_performances = []
+            
+            for client in selected_clients:
+                # Get cluster-specific epsilon if CADP is enabled
+                if self.cluster_manager:
+                    cluster_epsilon = self.cluster_manager.cluster_epsilons.get(
+                        client.cluster_id, round_epsilon
+                    )
+                else:
+                    cluster_epsilon = round_epsilon
+                
+                # Train client
+                performance = client.local_training_with_privacy(round_num, cluster_epsilon)
+                
+                if 'error' not in performance:
+                    client_performances.append(performance)
+                    
+                    # Get encrypted parameters
+                    params = client.get_encrypted_parameters()
+                    client_params.append(params)
+            
+            # Aggregate parameters
+            if client_params:
+                aggregated_params = self.aggregate_parameters(client_params)
+                
+                # Update global model
+                self.global_model.coefs_ = aggregated_params['coefs']
+                self.global_model.intercepts_ = aggregated_params['intercepts']
+                
+                # Update all clients
+                for client in self.clients:
+                    client.update_model_parameters(aggregated_params)
+            
+            # Evaluate global model
+            val_metrics = self.evaluate_global_model()
+            
+            # Record round results
+            round_result = {
+                'round': round_num + 1,
+                'val_accuracy': val_metrics['accuracy'],
+                'val_f1': val_metrics['f1_score'],
+                'client_performances': client_performances,
+                'epsilon_used': round_epsilon,
+                'n_clients': len(client_params)
+            }
+            
+            if self.noise_scheduler:
+                round_result['remaining_budget'] = self.noise_scheduler.get_remaining_budget(round_num + 1)
+            
+            self.round_results.append(round_result)
+            
+            logger.info(f"Round {round_num + 1} - Val Acc: {val_metrics['accuracy']:.4f}, "
+                       f"Val F1: {val_metrics['f1_score']:.4f}, ε: {round_epsilon:.2f}")
+            
+            # Early stopping
+            if val_metrics['accuracy'] > best_val_accuracy:
+                best_val_accuracy = val_metrics['accuracy']
+                best_round = round_num + 1
+                consecutive_no_improvement = 0
+            else:
+                consecutive_no_improvement += 1
+            
+            if consecutive_no_improvement >= 5:
+                logger.info(f"Early stopping at round {round_num + 1}")
+                break
+        
+        # Final evaluation
+        test_metrics = self.evaluate_global_model(on_test=True)
+        
+        logger.info(f"\nTraining Complete!")
+        logger.info(f"Best validation accuracy: {best_val_accuracy:.4f} at round {best_round}")
+        logger.info(f"Final test accuracy: {test_metrics['accuracy']:.4f}")
+        logger.info(f"Final test F1-score: {test_metrics['f1_score']:.4f}")
+        
+        return {
+            'round_results': self.round_results,
+            'test_metrics': test_metrics,
+            'best_val_accuracy': best_val_accuracy,
+            'best_round': best_round
+        }
+    
+    def evaluate_global_model(self, on_test: bool = False):
+        """Evaluate global model on validation or test set"""
+        if on_test:
+            X_eval = self.data_splits['X_test']
+            y_eval = self.data_splits['y_test']
+        else:
+            X_eval = self.data_splits['X_val']
+            y_eval = self.data_splits['y_val']
+        
+        predictions = self.global_model.predict(X_eval)
+        
+        metrics = {
+            'accuracy': accuracy_score(y_eval, predictions),
+            'f1_score': f1_score(y_eval, predictions, average='weighted'),
+            'precision': precision_score(y_eval, predictions, average='weighted'),
+            'recall': recall_score(y_eval, predictions, average='weighted')
+        }
+        
+        if on_test:
+            metrics['confusion_matrix'] = confusion_matrix(y_eval, predictions)
+            metrics['classification_report'] = classification_report(y_eval, predictions)
+        
+        return metrics
+
+
+class PrivacyEnhancedFederatedExperiment:
+    """Manages complete privacy-enhanced federated learning experiments"""
+    
+    def __init__(self, dataset_name: str, experiment_config: Dict = None):
+        self.dataset_name = dataset_name
+        self.experiment_config = experiment_config or {
+            'n_clients': 10,
+            'n_rounds': 20,
+            'data_distribution': 'non-iid',
+            'privacy_configs': [
+                {'name': 'no_privacy', 'ca_ldp': False, 'cadp': False, 's_he': False, 'uans': False},
+                {'name': 'ca_ldp_only', 'ca_ldp': True, 'cadp': False, 's_he': False, 'uans': False, 'base_epsilon': 1.0},
+                {'name': 'full_privacy', 'ca_ldp': True, 'cadp': True, 's_he': True, 'uans': True, 'base_epsilon': 1.0}
+            ]
+        }
+        self.results = {}
+    
+    def run_privacy_comparison(self):
+        """Run experiments comparing different privacy configurations"""
+        logger.info(f"\n{'='*80}")
+        logger.info(f"PRIVACY-ENHANCED FEDERATED LEARNING EXPERIMENT: {self.dataset_name.upper()}")
+        logger.info(f"{'='*80}")
+        
+        for privacy_config in self.experiment_config['privacy_configs']:
+            config_name = privacy_config['name']
+            logger.info(f"\n\n--- Running configuration: {config_name} ---")
+            
+            # Create server with privacy configuration
+            server = PriFedGridGuardServer(
+                dataset_name=self.dataset_name,
+                n_clients=self.experiment_config['n_clients'],
+                privacy_config=privacy_config
+            )
+            
+            # Setup
+            server.load_dataset_and_baseline()
+            server.create_federated_clients(self.experiment_config['data_distribution'])
+            server.initialize_global_model()
+            
+            # Run training
+            training_results = server.run_federated_training(
+                n_rounds=self.experiment_config['n_rounds']
+            )
+            
+            # Store results
+            self.results[config_name] = {
+                'training_results': training_results,
+                'privacy_config': privacy_config,
+                'baseline_comparison': server.best_baseline_config
+            }
+        
+        # Generate comparison report
+        self._generate_comparison_report()
+        
+        return self.results
+    
+    def _generate_comparison_report(self):
+        """Generate detailed comparison report"""
+        logger.info(f"\n\n{'='*80}")
+        logger.info("PRIVACY COMPARISON RESULTS")
+        logger.info(f"{'='*80}")
+        
+        # Summary table
+        summary_data = []
+        
+        for config_name, results in self.results.items():
+            test_metrics = results['training_results']['test_metrics']
+            
+            summary_data.append({
+                'Configuration': config_name,
+                'Test_Accuracy': test_metrics['accuracy'],
+                'Test_F1': test_metrics['f1_score'],
+                'Best_Val_Acc': results['training_results']['best_val_accuracy'],
+                'Best_Round': results['training_results']['best_round']
+            })
+        
+        # Print summary
+        import pandas as pd
+        summary_df = pd.DataFrame(summary_data)
+        print("\n" + summary_df.to_string(index=False))
+        
+        # Compare with baseline
+        if self.results and 'baseline_comparison' in list(self.results.values())[0]:
+            baseline = list(self.results.values())[0]['baseline_comparison']
+            if baseline:
+                print(f"\nBaseline {baseline['model_type']} Performance:")
+                print(f"  Accuracy: {baseline['accuracy']:.4f}")
+                print(f"  F1-Score: {baseline['f1_score']:.4f}")
+        
+        # Privacy-utility trade-off analysis
+        if 'no_privacy' in self.results and 'full_privacy' in self.results:
+            no_privacy_acc = self.results['no_privacy']['training_results']['test_metrics']['accuracy']
+            full_privacy_acc = self.results['full_privacy']['training_results']['test_metrics']['accuracy']
+            
+            accuracy_cost = (no_privacy_acc - full_privacy_acc) * 100
+            print(f"\nPrivacy Cost Analysis:")
+            print(f"  Accuracy reduction with full privacy: {accuracy_cost:.2f}%")
+            
+            if baseline:
+                fl_improvement = (full_privacy_acc - baseline['accuracy']) * 100
+                print(f"  FL with privacy vs centralized baseline: {fl_improvement:+.2f}%")
+    
+    def save_results(self, save_path: str = "results/federated_learning"):
+        """Save experiment results"""
+        save_path = Path(save_path)
+        save_path.mkdir(parents=True, exist_ok=True)
+        
+        # Save detailed results
+        with open(save_path / f'{self.dataset_name}_privacy_enhanced_results.pkl', 'wb') as f:
+            pickle.dump(self.results, f)
+        
+        # Save summary CSV
+        summary_data = []
+        for config_name, results in self.results.items():
+            test_metrics = results['training_results']['test_metrics']
+            summary_data.append({
+                'Dataset': self.dataset_name,
+                'Configuration': config_name,
+                'Test_Accuracy': test_metrics['accuracy'],
+                'Test_F1': test_metrics['f1_score'],
+                'Test_Precision': test_metrics['precision'],
+                'Test_Recall': test_metrics['recall']
+            })
+        
+        summary_df = pd.DataFrame(summary_data)
+        summary_df.to_csv(save_path / f'{self.dataset_name}_privacy_comparison.csv', index=False)
+        
+        logger.info(f"\nResults saved to {save_path}")
+
+
+def main():
+    """Run privacy-enhanced federated learning experiments"""
+    import argparse
+    from utils.config import Config
+    
+    # Load configuration
+    config = Config()
+    
+    parser = argparse.ArgumentParser(description='PriFed-GridGuard: Privacy-Enhanced FL for Smart Grid')
+    parser.add_argument('--dataset', choices=['msu', 'pecan', 'sgcc', 'all'], 
+                       default='all', help='Dataset to use')
+    parser.add_argument('--n_clients', type=int, 
+                       default=config.get('federated_learning.num_clients', 10), 
+                       help='Number of federated clients')
+    parser.add_argument('--n_rounds', type=int, 
+                       default=config.get('federated_learning.num_rounds', 20),
+                       help='Number of federated rounds')
+    parser.add_argument('--distribution', choices=['iid', 'non-iid'], 
+                       default=config.get('federated_learning.data_distribution', 'non-iid'), 
+                       help='Data distribution')
+    parser.add_argument('--epsilon', type=float, 
+                       default=config.get('privacy.default_epsilon', 1.0),
+                       help='Base epsilon for differential privacy')
+    
+    args = parser.parse_args()
+    
+    # Experiment configuration with config file integration
+    experiment_config = {
+        'n_clients': args.n_clients,
+        'n_rounds': args.n_rounds,
+        'data_distribution': args.distribution,
+        'privacy_configs': [
+            {
+                'name': 'no_privacy',
+                'ca_ldp': False, 'cadp': False, 's_he': False, 'uans': False
+            },
+            {
+                'name': 'ca_ldp_only',
+                'ca_ldp': True, 'cadp': False, 's_he': False, 'uans': False,
+                'base_epsilon': args.epsilon
+            },
+            {
+                'name': 'cadp_only', 
+                'ca_ldp': False, 'cadp': True, 's_he': False, 'uans': False,
+                'base_epsilon': args.epsilon, 'n_clusters': 3
+            },
+            {
+                'name': 'full_privacy',
+                'ca_ldp': True, 'cadp': True, 's_he': True, 'uans': True,
+                'base_epsilon': args.epsilon, 'n_clusters': 3,
+                'total_privacy_budget': config.get('privacy.accounting.max_privacy_loss', 10.0)
+            }
+        ]
+    }
+    
+    # Log configuration usage
+    logger.info("Using configuration values:")
+    logger.info(f"  - Clients: {args.n_clients} (config default: {config.get('federated_learning.num_clients')})")
+    logger.info(f"  - Rounds: {args.n_rounds} (config default: {config.get('federated_learning.num_rounds')})")
+    logger.info(f"  - Distribution: {args.distribution} (config default: {config.get('federated_learning.data_distribution')})")
+    logger.info(f"  - Epsilon: {args.epsilon} (config default: {config.get('privacy.default_epsilon')})")
+    
+    # Run experiments
+    datasets = ['msu', 'pecan', 'sgcc'] if args.dataset == 'all' else [args.dataset]
+    
+    all_results = {}
+    
+    for dataset_name in datasets:
+        try:
+            experiment = PrivacyEnhancedFederatedExperiment(
+                dataset_name=dataset_name,
+                experiment_config=experiment_config
+            )
+            
+            results = experiment.run_privacy_comparison()
+            experiment.save_results()
+            
+            all_results[dataset_name] = results
+            
+        except Exception as e:
+            logger.error(f"Error running experiment for {dataset_name}: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    # Generate cross-dataset comparison if multiple datasets
+    if len(all_results) > 1:
+        logger.info(f"\n\n{'='*80}")
+        logger.info("CROSS-DATASET COMPARISON")
+        logger.info(f"{'='*80}")
+        
+        comparison_data = []
+        for dataset_name, dataset_results in all_results.items():
+            for config_name, config_results in dataset_results.items():
+                test_metrics = config_results['training_results']['test_metrics']
+                comparison_data.append({
+                    'Dataset': dataset_name.upper(),
+                    'Configuration': config_name,
+                    'Accuracy': f"{test_metrics['accuracy']:.4f}",
+                    'F1-Score': f"{test_metrics['f1_score']:.4f}"
+                })
+        
+        import pandas as pd
+        comparison_df = pd.DataFrame(comparison_data)
+        print("\n" + comparison_df.to_string(index=False))
+
 
 if __name__ == "__main__":
     main()

@@ -17,9 +17,9 @@ class Config:
     
     def __init__(self, config_path=None):
         if config_path is None:
-            # Default config path
+            # Default config path - use enhanced_config.yaml
             project_root = Path(__file__).parent.parent.parent
-            config_path = project_root / "configs" / "config.yaml"
+            config_path = project_root / "configs" / "enhanced_config.yaml"
         
         self.config_path = Path(config_path)
         self.config = self.load_config()
